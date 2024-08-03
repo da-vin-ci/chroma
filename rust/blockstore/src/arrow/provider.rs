@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use chroma_cache::cache::Cache;
 use chroma_config::Configurable;
 use chroma_error::{ChromaError, ErrorCodes};
-use chroma_storage::{network_admission_control::NetworkAdmissionControl, Storage};
+use chroma_storage::{
+    network_admission_control::{NetworkAdmissionControl, NetworkAdmissionControlError},
+    Storage,
+};
 use core::panic;
 use futures::StreamExt;
 use thiserror::Error;
@@ -233,66 +236,39 @@ impl BlockManager {
         match block {
             Some(block) => Some(block.clone()),
             None => {
-                // TODO: NAC register/deregister/validation goes here.
-                async {
-                    let key = format!("block/{}", id);
-                    let stream = self.storage.get(&key).instrument(
-                        tracing::trace_span!(parent: Span::current(), "BlockManager storage get"),
-                    ).await;
-                    match stream {
-                        Ok(mut bytes) => {
-                            let read_block_span = tracing::trace_span!(parent: Span::current(), "BlockManager read bytes to end");
-                            let buf = read_block_span.in_scope(|| async {
-                                let mut buf: Vec<u8> = Vec::new();
-                                while let Some(res) = bytes.next().await {
-                                    match res {
-                                        Ok(chunk) => {
-                                            buf.extend(chunk);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Error reading block from storage: {}", e);
-                                            return None;
-                                        }
-                                    }
-                                }
-                                Some(buf)
-                            }
-                            ).await;
-                            let buf =  match buf {
-                                Some(buf) => {
-                                    buf
-                                }
-                                None => {
-                                    return None;
-                                }
-                            };
-                            tracing::info!("Read {:?} bytes from s3", buf.len());
-                            let deserialization_span = tracing::trace_span!(parent: Span::current(), "BlockManager deserialize block");
-                            let block = deserialization_span.in_scope(|| Block::from_bytes(&buf, *id));
-                            match block {
-                                Ok(block) => {
-                                    self.block_cache.insert(*id, block.clone());
-                                    Some(block)
-                                }
-                                Err(e) => {
-                                    // TODO: Return an error to callsite instead of None.
-                                    tracing::error!(
-                                        "Error converting bytes to Block {:?}/{:?}",
-                                        key,
-                                        e
-                                    );
-                                    None
-                                }
-                            }
-                        },
+                let key = format!("block/{}", id);
+                // Clone the cache is cheap since it is arc type.
+                let cache_clone = self.block_cache.clone();
+                let id_copy = id.clone();
+                let cb = move |buf: Vec<u8>| async move {
+                    let deserialization_span = tracing::trace_span!(parent: Span::current(), "BlockManager deserialize block");
+                    let block = deserialization_span.in_scope(|| Block::from_bytes(&buf, id_copy));
+                    match block {
+                        Ok(block) => {
+                            cache_clone.insert(id_copy, block.clone());
+                        }
                         Err(e) => {
-                            tracing::error!("Error reading block from storage: {}", e);
-                            None
+                            tracing::error!("Error converting bytes to Block {:?}", e);
+                            return Err(Box::new(
+                                NetworkAdmissionControlError::DeserializationError,
+                            ));
                         }
                     }
+                    Ok(())
+                };
+                match self.network_admission_control.get(key, cb).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        // TODO: Return error here.
+                        tracing::error!(
+                            "Error getting block from the network admission control {}",
+                            e
+                        );
+                        return None;
+                    }
                 }
-                .instrument(tracing::trace_span!(parent: Span::current(), "BlockManager get cold"))
-                .await
+                // Cache must be populated now.
+                self.block_cache.get(id)
             }
         }
     }
