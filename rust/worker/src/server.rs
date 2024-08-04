@@ -68,7 +68,19 @@ impl Configurable<QueryServiceConfig> for WorkerServer {
             }
         };
 
-        let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+        let network_admission_control =
+            match chroma_storage::network_admission_control::from_config(
+                &config.storage_admission,
+                storage.clone(),
+            )
+            .await
+            {
+                Ok(nac) => nac,
+                Err(err) => {
+                    tracing::error!("Failed to create nac component: {:?}", err);
+                    return Err(err);
+                }
+            };
 
         let blockfile_provider = BlockfileProvider::try_from_config(&(
             config.blockfile_provider.clone(),
@@ -588,7 +600,8 @@ mod tests {
         let sparse_index_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
         let hnsw_index_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
         let port = random_port::PortPicker::new().pick().unwrap();
-        let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+        let network_admission_control =
+            NetworkAdmissionControl::new_with_default_policy(storage.clone());
         let mut server = WorkerServer {
             dispatcher: None,
             system: None,

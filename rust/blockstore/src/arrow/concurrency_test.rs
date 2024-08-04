@@ -25,7 +25,8 @@ mod tests {
                 let sparse_index_cache = Cache::new(&CacheConfig::Lru(LruConfig {
                     capacity: SPARSE_INDEX_CACHE_CAPACITY,
                 }));
-                let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+                let network_admission_control =
+                    NetworkAdmissionControl::new_with_default_policy(storage.clone());
                 let blockfile_provider = ArrowBlockfileProvider::new(
                     storage,
                     TEST_MAX_BLOCK_SIZE_BYTES,

@@ -487,7 +487,8 @@ mod tests {
 
         let storage = Storage::Local(LocalStorage::new(storage_dir.to_str().unwrap()));
         let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
-        let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+        let network_admission_control =
+            NetworkAdmissionControl::new_with_default_policy(storage.clone());
         let provider =
             HnswIndexProvider::new(storage, hnsw_tmp_path, cache, network_admission_control);
         let segment = Segment {

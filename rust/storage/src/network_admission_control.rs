@@ -1,9 +1,14 @@
+use crate::config::{CountBasedPolicyConfig, StorageAdmissionConfig};
+
 use super::{GetError, Storage};
+use async_trait::async_trait;
+use chroma_config::Configurable;
 use chroma_error::{ChromaError, ErrorCodes};
-use futures::{future::Shared, FutureExt, StreamExt};
+use futures::{future::Shared, FutureExt, StreamExt, TryFutureExt};
 use parking_lot::Mutex;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 use thiserror::Error;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::{Instrument, Span};
 
 #[derive(Clone)]
@@ -25,6 +30,7 @@ pub struct NetworkAdmissionControl {
             >,
         >,
     >,
+    rate_limiter: Arc<RateLimitPolicy>,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -48,10 +54,18 @@ impl ChromaError for NetworkAdmissionControlError {
 }
 
 impl NetworkAdmissionControl {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new_with_default_policy(storage: Storage) -> Self {
         Self {
             storage,
             outstanding_requests: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: Arc::new(RateLimitPolicy::CountBasedPolicy(CountBasedPolicy::new(15))),
+        }
+    }
+    pub fn new(storage: Storage, policy: RateLimitPolicy) -> Self {
+        Self {
+            storage,
+            outstanding_requests: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: Arc::new(policy),
         }
     }
 
@@ -108,6 +122,22 @@ impl NetworkAdmissionControl {
         }
     }
 
+    async fn enter(&self) -> SemaphorePermit<'_> {
+        match &*self.rate_limiter {
+            RateLimitPolicy::CountBasedPolicy(policy) => {
+                return policy.acquire().await;
+            }
+        }
+    }
+
+    async fn exit(&self, permit: SemaphorePermit<'_>) {
+        match &*self.rate_limiter {
+            RateLimitPolicy::CountBasedPolicy(policy) => {
+                policy.drop(permit).await;
+            }
+        }
+    }
+
     pub async fn get<F, R>(
         &self,
         key: String,
@@ -117,6 +147,8 @@ impl NetworkAdmissionControl {
         R: Future<Output = Result<(), Box<NetworkAdmissionControlError>>> + Send + 'static,
         F: (FnOnce(Vec<u8>) -> R) + Send + 'static,
     {
+        // Wait for permit.
+        let permit = self.enter().await;
         let future_to_await;
         {
             let mut requests = self.outstanding_requests.lock();
@@ -141,6 +173,63 @@ impl NetworkAdmissionControl {
             let mut requests = self.outstanding_requests.lock();
             requests.remove(&key);
         }
+        // Release permit.
+        self.exit(permit).await;
         res
+    }
+}
+
+// Prefer enum dispatch over dyn since there could
+// only be a handful of these policies.
+#[derive(Debug)]
+enum RateLimitPolicy {
+    CountBasedPolicy(CountBasedPolicy),
+}
+
+#[derive(Debug)]
+struct CountBasedPolicy {
+    max_allowed_outstanding: usize,
+    remaining_tokens: Semaphore,
+}
+
+impl CountBasedPolicy {
+    fn new(max_allowed_outstanding: usize) -> Self {
+        Self {
+            max_allowed_outstanding,
+            remaining_tokens: Semaphore::new(max_allowed_outstanding),
+        }
+    }
+    async fn acquire(&self) -> SemaphorePermit<'_> {
+        let token_res = self.remaining_tokens.acquire().await;
+        match token_res {
+            Ok(token) => {
+                return token;
+            }
+            Err(e) => panic!("AcquireToken Failed {}", e),
+        }
+    }
+    async fn drop(&self, permit: SemaphorePermit<'_>) {
+        drop(permit);
+    }
+}
+
+pub async fn from_config(
+    config: &StorageAdmissionConfig,
+    storage: Storage,
+) -> Result<NetworkAdmissionControl, Box<dyn ChromaError>> {
+    match &config {
+        StorageAdmissionConfig::CountBasedPolicy(policy) => Ok(NetworkAdmissionControl::new(
+            storage,
+            RateLimitPolicy::CountBasedPolicy(CountBasedPolicy::try_from_config(policy).await?),
+        )),
+    }
+}
+
+#[async_trait]
+impl Configurable<CountBasedPolicyConfig> for CountBasedPolicy {
+    async fn try_from_config(
+        config: &CountBasedPolicyConfig,
+    ) -> Result<Self, Box<dyn ChromaError>> {
+        Ok(Self::new(config.max_concurrent_requests))
     }
 }

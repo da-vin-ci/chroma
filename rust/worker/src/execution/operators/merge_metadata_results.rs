@@ -402,7 +402,8 @@ mod test {
         let storage = Storage::Local(LocalStorage::new(tmp_dir.path().to_str().unwrap()));
         let block_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
         let sparse_index_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
-        let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+        let network_admission_control =
+            NetworkAdmissionControl::new_with_default_policy(storage.clone());
         let arrow_blockfile_provider = ArrowBlockfileProvider::new(
             storage,
             TEST_MAX_BLOCK_SIZE_BYTES,
@@ -699,7 +700,8 @@ mod test {
         let storage = Storage::Local(LocalStorage::new(tmp_dir.path().to_str().unwrap()));
         let block_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
         let sparse_index_cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
-        let network_admission_control = NetworkAdmissionControl::new(storage.clone());
+        let network_admission_control =
+            NetworkAdmissionControl::new_with_default_policy(storage.clone());
         let arrow_blockfile_provider = ArrowBlockfileProvider::new(
             storage,
             TEST_MAX_BLOCK_SIZE_BYTES,
