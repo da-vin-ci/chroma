@@ -10,7 +10,7 @@ import (
 )
 
 const garbageCollectCollections = `-- name: GarbageCollectCollections :exec
-DELETE FROM record_log r where r.collection_id = ANY($1::string[])
+DELETE FROM record_log r where r.collection_id = ANY($1::text[])
 `
 
 func (q *Queries) GarbageCollectCollections(ctx context.Context, collectionIds []string) error {

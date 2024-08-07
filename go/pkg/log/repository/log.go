@@ -16,7 +16,7 @@ import (
 type LogRepository struct {
 	conn    *pgxpool.Pool
 	queries *log.Queries
-	sysDb   *sysdb.SysDB
+	sysDb   sysdb.ISysDB
 }
 
 func (r *LogRepository) InsertRecords(ctx context.Context, collectionId string, records [][]byte) (insertCount int64, err error) {
@@ -113,7 +113,7 @@ func (r *LogRepository) UpdateCollectionCompactionOffsetPosition(ctx context.Con
 	if err != nil {
 		trace_log.Error("Error in updating record_compaction_offset_position in the collection table", zap.Error(err), zap.String("collectionId", collectionId))
 	}
-	trace_log.Info("Updated record_compaction_offset_position in the collection table", zap.Int64("recordCount", offsetPosition), zap.String("collectionId", collectionId))
+	trace_log.Info("Updated record_compaction_offset_position in the collection table", zap.Int64("offsetPosition", offsetPosition), zap.String("collectionId", collectionId))
 	return
 }
 
@@ -128,7 +128,7 @@ func (r *LogRepository) GarbageCollection(ctx context.Context) error {
 		trace_log.Error("Error in getting collections to compact", zap.Error(err))
 		return err
 	} else {
-		trace_log.Info("Got collections to compact", zap.Int("collectionCount", len(collectionToCompact)))
+		trace_log.Info("GC Got collections to compact", zap.Int("collectionCount", len(collectionToCompact)))
 	}
 	if collectionToCompact == nil {
 		return nil
@@ -148,14 +148,15 @@ func (r *LogRepository) GarbageCollection(ctx context.Context) error {
 		trace_log.Info("Collections to be garbage collected", zap.Strings("collections", collectionsToGC))
 		err = r.queries.GarbageCollectCollections(ctx, collectionsToGC)
 		if err != nil {
-			trace_log.Error("Error in purging records", zap.Error(err))
+			trace_log.Error("Error in garbage collection", zap.Error(err))
 			return err
 		}
+		trace_log.Info("Garbage collection completed", zap.Strings("collections", collectionsToGC))
 	}
 	return nil
 }
 
-func NewLogRepository(conn *pgxpool.Pool, sysDb *sysdb.SysDB) *LogRepository {
+func NewLogRepository(conn *pgxpool.Pool, sysDb sysdb.ISysDB) *LogRepository {
 	return &LogRepository{
 		conn:    conn,
 		queries: log.New(conn),

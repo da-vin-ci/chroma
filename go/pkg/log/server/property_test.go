@@ -9,6 +9,7 @@ import (
 	log "github.com/chroma-core/chroma/go/database/log/db"
 	"github.com/chroma-core/chroma/go/pkg/log/configuration"
 	"github.com/chroma-core/chroma/go/pkg/log/repository"
+	"github.com/chroma-core/chroma/go/pkg/log/sysdb"
 	"github.com/chroma-core/chroma/go/pkg/proto/coordinatorpb"
 	"github.com/chroma-core/chroma/go/pkg/proto/logservicepb"
 	"github.com/chroma-core/chroma/go/pkg/types"
@@ -41,6 +42,7 @@ type LogServerTestSuite struct {
 	model     ModelState
 	t         *testing.T
 	lr        *repository.LogRepository
+	sysDb     sysdb.ISysDB
 }
 
 func (suite *LogServerTestSuite) SetupSuite() {
@@ -54,7 +56,8 @@ func (suite *LogServerTestSuite) SetupSuite() {
 	assert.NoError(suite.t, err, "Failed to create new pg connection")
 	err = libs2.RunMigration(ctx, connectionString)
 	assert.NoError(suite.t, err, "Failed to run migration")
-	suite.lr = repository.NewLogRepository(conn, nil)
+	suite.sysDb = sysdb.NewMockSysDB()
+	suite.lr = repository.NewLogRepository(conn, suite.sysDb)
 	suite.logServer = NewLogServer(suite.lr)
 	suite.model = ModelState{
 		CollectionEnumerationOffset: map[types.UniqueID]uint64{},
@@ -252,6 +255,19 @@ func (suite *LogServerTestSuite) modelPurgeLogs(ctx context.Context, t *rapid.T)
 	}
 }
 
+func (suite *LogServerTestSuite) modelGarbageCollection(ctx context.Context, t *rapid.T) {
+	for id := range suite.model.CollectionData {
+		exist, err := suite.sysDb.CheckCollection(ctx, id.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exist {
+			// Collection does not exist, so we can delete it
+			delete(suite.model.CollectionData, id)
+		}
+	}
+}
+
 func (suite *LogServerTestSuite) modelGetAllCollectionInfoToCompact(ctx context.Context, t *rapid.T) (uint64, uint64, map[types.UniqueID]uint64, bool) {
 	minCompactionSize := uint64(math.MaxUint64)
 	maxCompactionSize := uint64(0)
@@ -289,6 +305,19 @@ func (suite *LogServerTestSuite) TestRecordLogDb_PushLogs() {
 		position := rapid.IntRange(0, maxCollections-1).Draw(t, "collection_position")
 		if _, ok := collections[position]; !ok {
 			collections[position] = types.NewUniqueID()
+		}
+		exist, err := suite.sysDb.CheckCollection(ctx, collections[position].String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exist {
+			// Collection does not exist, so we need to add it with 50% probability
+			if rapid.Bool().Draw(t, "add_collection") { // 50% probability
+				err = suite.sysDb.AddCollection(ctx, collections[position].String())
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
 		}
 		return collections[position]
 	})
@@ -442,15 +471,37 @@ func (suite *LogServerTestSuite) TestRecordLogDb_PushLogs() {
 
 				// Verify that all record logs are purged
 				for id, offset := range suite.model.CollectionCompactionOffset {
+					_, ok := suite.model.CollectionData[id]
+					if !ok {
+						t.Logf("collection id %s has no data", id)
+						continue
+					}
+					exist, err := suite.sysDb.CheckCollection(ctx, id.String())
+					suite.NoError(err)
+					if !exist {
+						t.Logf("collection id %s does not exist in sysdb", id)
+						continue
+					}
 					if offset != 0 {
 						var records []log.RecordLog
 						records, err = suite.lr.PullRecords(ctx, id.String(), 0, 1, time.Now().UnixNano())
 						suite.NoError(err)
 						if len(records) > 0 {
-							suite.Equal(int64(offset)+1, records[0].Offset)
+							// suite.Equal(int64(offset)+1, records[0].Offset)
+							if int64(offset)+1 != records[0].Offset {
+								t.Fatalf("expected offset %d, got %d for collection id %s", int64(offset)+1, records[0].Offset, id)
+							}
 						}
 					}
 				}
+			},
+			"garbageCollection": func(t *rapid.T) {
+				// Garbage collect the model
+				suite.modelGarbageCollection(ctx, t)
+
+				// Garbage collect the SUT
+				err := suite.lr.GarbageCollection(ctx)
+				suite.NoError(err)
 			},
 			"": func(t *rapid.T) {
 				// "" is the invariant check function in rapid
